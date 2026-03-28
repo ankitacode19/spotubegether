@@ -2,7 +2,7 @@ const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const fetch = require("node-fetch");
+
 const path = require("path");
 
 // ─────────────────────────────────────────
@@ -48,58 +48,7 @@ function roomMemberList(room) {
   return Array.from(room.members.entries()).map(([id, m]) => ({ id, ...m }));
 }
 
-// ─────────────────────────────────────────
-// REST: SPOTIFY TOKEN PROXY
-// Exchanges sp_dc cookie for a short-lived access token.
-// Your sp_dc cookie is sent to THIS server, then forwarded
-// to Spotify's internal endpoint. It is never logged or stored.
-// ─────────────────────────────────────────
-app.post("/api/spotify/token", async (req, res) => {
-  const { sp_dc } = req.body;
-
-  if (!sp_dc || typeof sp_dc !== "string" || sp_dc.length < 20) {
-    return res.status(400).json({ error: "Invalid sp_dc cookie" });
-  }
-
-  // Sanitize: only allow alphanumeric + common cookie chars
-  const safe = sp_dc.replace(/[^a-zA-Z0-9_\-]/g, "");
-  if (safe !== sp_dc) {
-    return res.status(400).json({ error: "Cookie contains invalid characters" });
-  }
-
-  try {
-    const response = await fetch(
-      "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
-      {
-        headers: {
-          Cookie: `sp_dc=${safe}`,
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-          "Accept-Language": "en",
-        },
-      }
-    );
-
-    if (!response.ok) {
-      return res.status(401).json({ error: "Invalid or expired sp_dc cookie" });
-    }
-
-    const data = await response.json();
-
-    if (!data.accessToken) {
-      return res.status(401).json({ error: "Could not get access token — check your sp_dc value" });
-    }
-
-    // Return ONLY the access token — never echo back the cookie
-    return res.json({
-      accessToken: data.accessToken,
-      expiresIn: data.accessTokenExpirationTimestampMs,
-    });
-  } catch (err) {
-    console.error("Spotify token error:", err.message);
-    return res.status(500).json({ error: "Failed to reach Spotify" });
-  }
-});
+// No REST endpoints needed — Spotify sync is fully embed-based via Socket.io
 
 // ─────────────────────────────────────────
 // SOCKET.IO — ROOM EVENTS
@@ -212,34 +161,58 @@ io.on("connection", (socket) => {
     socket.to(currentCode).emit("yt_seek", { senderId: socket.id, name: member.name, timestamp });
   });
 
-  // ── SPOTIFY: SYNC (host → all) ──
-  socket.on("sp_sync", (data) => {
+  // ── SPOTIFY: LOAD TRACK (host loads a track for everyone) ──
+  socket.on("sp_load", (data) => {
     if (!currentCode || !currentRoom) return;
     const member = currentRoom.members.get(socket.id);
     if (!member) return;
+    // trackId: Spotify track ID, e.g. "4iV5W9uYEdYUVa79Axb7Rh"
+    const safeTrackId = String(data.trackId || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 30);
+    if (!safeTrackId) return;
     currentRoom.spState = {
-      trackTitle: String(data.trackTitle || "").slice(0, 100),
-      trackArtist: String(data.trackArtist || "").slice(0, 100),
-      trackUri: String(data.trackUri || "").slice(0, 200),
-      progress: Number(data.progress) || 0,
-      duration: Number(data.duration) || 0,
-      playing: Boolean(data.playing),
+      trackId: safeTrackId,
+      trackName: String(data.trackName || "").slice(0, 100),
+      artistName: String(data.artistName || "").slice(0, 100),
+      position: 0,
+      playing: true,
       updatedAt: Date.now(),
     };
-    socket.to(currentCode).emit("sp_sync", {
+    io.to(currentCode).emit("sp_load", {
       senderId: socket.id, name: member.name,
       ...currentRoom.spState,
     });
   });
 
-  // ── SPOTIFY: CONTROL (play/pause/next/prev) ──
-  socket.on("sp_control", ({ action }) => {
+  // ── SPOTIFY: PLAY ──
+  socket.on("sp_play", ({ position }) => {
     if (!currentCode || !currentRoom) return;
     const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    io.to(currentCode).emit("sp_control", {
-      senderId: socket.id, name: member.name, action,
-    });
+    if (!member || !currentRoom.spState) return;
+    currentRoom.spState.playing = true;
+    currentRoom.spState.position = Number(position) || 0;
+    currentRoom.spState.updatedAt = Date.now();
+    socket.to(currentCode).emit("sp_play", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
+  });
+
+  // ── SPOTIFY: PAUSE ──
+  socket.on("sp_pause", ({ position }) => {
+    if (!currentCode || !currentRoom) return;
+    const member = currentRoom.members.get(socket.id);
+    if (!member || !currentRoom.spState) return;
+    currentRoom.spState.playing = false;
+    currentRoom.spState.position = Number(position) || 0;
+    currentRoom.spState.updatedAt = Date.now();
+    socket.to(currentCode).emit("sp_pause", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
+  });
+
+  // ── SPOTIFY: SEEK ──
+  socket.on("sp_seek", ({ position }) => {
+    if (!currentCode || !currentRoom) return;
+    const member = currentRoom.members.get(socket.id);
+    if (!member || !currentRoom.spState) return;
+    currentRoom.spState.position = Number(position) || 0;
+    currentRoom.spState.updatedAt = Date.now();
+    socket.to(currentCode).emit("sp_seek", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
   });
 
   // ── DISCONNECT ──

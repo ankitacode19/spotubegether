@@ -268,13 +268,12 @@
       </div>
     </div>
   </div>
+
+  <!-- LOBBY -->
   <div class="lobby-screen" id="sp-lobby">
     <div class="lobby-card">
       <div class="lobby-title">♫ Spotify Listen Along</div>
-      <div class="warning-box">
-        <strong>⚠️ How this works safely</strong>
-        Your <code>sp_dc</code> cookie is sent to the SyncSpace server only to get a short-lived Spotify access token — exactly the same thing your browser does when you open Spotify. The cookie is <em>never stored or logged</em>. Only the token is kept in memory for your session.
-      </div>
+      <p class="lobby-sub">No cookies, no Premium needed. The host loads a track via Spotify embed — everyone in the room hears it in sync.</p>
       <label class="field-label">Your display name</label>
       <input class="field-input" id="sp-name" placeholder="e.g. Jordan" maxlength="24">
       <button class="btn btn-sp" onclick="spCreate()">✨ Create new room</button>
@@ -284,40 +283,42 @@
       <button class="btn btn-outline" onclick="spJoin()">→ Join room</button>
     </div>
   </div>
+
+  <!-- ROOM -->
   <div class="room-layout" id="sp-room">
     <div class="main-area">
-      <div class="sp-auth-card" id="sp-auth-section">
-        <div class="sync-controls-title" style="font-family:'Syne',sans-serif;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:12px;">🔑 Connect your Spotify</div>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6;">
-          1. Open <a href="https://open.spotify.com" target="_blank" style="color:var(--sp)">open.spotify.com</a> and log in.<br>
-          2. Open DevTools (F12) → Application → Cookies → <code>open.spotify.com</code><br>
-          3. Find the cookie named <code>sp_dc</code> and copy its value.
+
+      <!-- Track loader -->
+      <div class="sync-controls" style="margin-bottom:16px">
+        <div class="sync-controls-title">🎵 Load a track</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.6">
+          Paste any Spotify track link (e.g. <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:12px">open.spotify.com/track/…</code>)
         </p>
-        <input class="field-input" id="sp-dc-input" placeholder="Paste sp_dc value here…" style="font-size:12px;font-family:monospace">
-        <button class="btn btn-sp" onclick="spConnect()" style="margin-bottom:0">Connect Spotify</button>
-        <p style="font-size:11px;color:var(--muted);margin-top:10px;">Your cookie is used only to get a token. It is never stored or logged.</p>
+        <div class="yt-url-bar" style="margin-bottom:0">
+          <input class="field-input" id="sp-url-input" placeholder="Paste Spotify track URL…" style="margin-bottom:0">
+          <button class="btn btn-sp" onclick="spLoad()" style="width:auto;padding:12px 20px;font-size:13px">▶ Load</button>
+        </div>
       </div>
-      <div id="sp-connected-section" style="display:none">
-        <div class="now-playing-card" style="margin-bottom:16px">
-          <div class="np-art" id="sp-art">🎵</div>
-          <div class="np-title" id="sp-track">Not playing</div>
-          <div class="np-artist" id="sp-artist">—</div>
-          <div class="progress-bar"><div class="progress-fill" id="sp-prog"></div></div>
-          <div class="progress-times"><span id="sp-cur">0:00</span><span id="sp-dur">0:00</span></div>
+
+      <!-- Spotify embed player -->
+      <div id="sp-embed-wrap" style="border-radius:16px;overflow:hidden;margin-bottom:16px;background:#000;min-height:80px;display:flex;align-items:center;justify-content:center;">
+        <div style="color:var(--muted);font-size:14px;padding:32px;text-align:center">
+          🎵 Load a track above to start listening together
         </div>
-        <div class="sync-controls">
-          <div class="sync-controls-title">Playback — syncs to all room members</div>
-          <div class="btn-row">
-            <button class="btn-sm" onclick="spCtrl('prev')">⏮</button>
-            <button class="btn-sm" onclick="spCtrl('toggle')" id="sp-play-btn">▶</button>
-            <button class="btn-sm" onclick="spCtrl('next')">⏭</button>
-            <button class="btn-sm" onclick="spCtrl('resync')">🔄</button>
-          </div>
+      </div>
+
+      <!-- Sync controls -->
+      <div class="sync-controls" id="sp-controls" style="display:none">
+        <div class="sync-controls-title">Playback — syncs to everyone in the room</div>
+        <div class="btn-row">
+          <button class="btn-sm" onclick="spCtrl('play')" title="Play">▶</button>
+          <button class="btn-sm" onclick="spCtrl('pause')" title="Pause">⏸</button>
+          <button class="btn-sm" onclick="spCtrl('resync')" title="Re-sync everyone to your position">🔄 Sync all</button>
         </div>
-        <div class="sp-info-note" style="margin-top:16px">
-          <strong style="color:var(--text)">How sync works</strong><br>
-          Controls send a sync signal to everyone in the room. Each person's Spotify client plays the same track at the same position. Spotify must be open on your device. This app does NOT stream audio — it only coordinates timing.
-        </div>
+        <p style="font-size:11px;color:var(--muted);margin-top:12px">
+          🔄 Sync All = everyone jumps to your current position instantly.
+        </p>
+      </div>
       </div>
     </div>
     <div class="sidebar">
@@ -570,16 +571,80 @@ function ytChat() {
   i.value = '';
 }
 
-// ─── SPOTIFY SOCKET ───
+// ─── SPOTIFY SOCKET (EMBED-BASED) ───
 let spSocket = null;
 let spMySocketId = null;
 let spMembers = [];
-let spAccessToken = null;
-let spIsPlaying = false;
-let spProgress = 0;
-let spDuration = 0;
-let spPolling = null;
 let spMyName = 'Guest';
+let spEmbedController = null;  // Spotify IFrame API controller
+let spCurrentPosition = 0;     // seconds
+let spCurrentTrackId = null;
+
+// Load Spotify IFrame API script
+(function() {
+  const s = document.createElement('script');
+  s.src = 'https://open.spotify.com/embed/iframe-api/v1';
+  s.async = true;
+  document.head.appendChild(s);
+})();
+
+// Called by Spotify when IFrame API is ready
+window.onSpotifyIframeApiReady = (IFrameAPI) => {
+  window._SpotifyIFrameAPI = IFrameAPI;
+};
+
+function spCreateEmbedController(trackId, startPositionSec, autoPlay, onReady) {
+  const wrap = document.getElementById('sp-embed-wrap');
+  wrap.innerHTML = '<div id="sp-embed-el"></div>';
+  const el = document.getElementById('sp-embed-el');
+
+  if (!window._SpotifyIFrameAPI) {
+    toast('⚠️ Spotify embed API not loaded yet, try again in a second');
+    return;
+  }
+
+  const options = {
+    uri: `spotify:track:${trackId}`,
+    width: '100%',
+    height: '152',
+  };
+
+  window._SpotifyIFrameAPI.createController(el, options, (controller) => {
+    spEmbedController = controller;
+
+    controller.addListener('ready', () => {
+      if (startPositionSec > 0) controller.seek(startPositionSec);
+      if (autoPlay) controller.play();
+      if (onReady) onReady();
+    });
+
+    controller.addListener('playback_update', (e) => {
+      spCurrentPosition = e.data.position; // seconds
+      // If I'm the host, broadcast position updates every ~3s
+      if (spSocket && spMembers.find(m => m.id === spMySocketId)?.isHost) {
+        if (!e.data.isPaused) {
+          // throttle: only emit every 3 seconds
+          if (!spBroadcastThrottle) {
+            spBroadcastThrottle = setTimeout(() => {
+              spSocket.emit('sp_seek', { position: spCurrentPosition });
+              spBroadcastThrottle = null;
+            }, 3000);
+          }
+        }
+      }
+    });
+  });
+}
+
+let spBroadcastThrottle = null;
+
+function spExtractTrackId(url) {
+  // accepts: full URL, URI, or bare ID
+  const m = url.match(/track[/:]([a-zA-Z0-9]{22})/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9]{22}$/.test(url)) return url;
+  return null;
+}
 
 function spInitSocket(roomCode, name, isHost) {
   spMyName = name;
@@ -596,9 +661,14 @@ function spInitSocket(roomCode, name, isHost) {
     spMySocketId = data.yourId;
     spMembers = data.members;
     renderMembers('sp', spMembers, spMySocketId);
-    if (data.spState) {
-      const elapsed = data.spState.playing ? Date.now() - data.spState.updatedAt : 0;
-      spUpdateUI(data.spState.trackTitle, data.spState.trackArtist, data.spState.progress + elapsed, data.spState.duration);
+    // If a track is already loaded in the room, load it for this new joiner
+    if (data.spState && data.spState.trackId) {
+      const elapsed = data.spState.playing ? (Date.now() - data.spState.updatedAt) / 1000 : 0;
+      const startPos = data.spState.position + elapsed;
+      spCurrentTrackId = data.spState.trackId;
+      spCreateEmbedController(data.spState.trackId, startPos, data.spState.playing, null);
+      document.getElementById('sp-controls').style.display = 'block';
+      addMsg('sp','System','Synced to room track ✓','#1DB954',true);
     }
   });
 
@@ -618,19 +688,30 @@ function spInitSocket(roomCode, name, isHost) {
     if (senderId !== spMySocketId) addMsg('sp', n, text, color);
   });
 
-  spSocket.on('sp_sync', async (data) => {
-    if (data.senderId === spMySocketId) return;
-    spUpdateUI(data.trackTitle, data.trackArtist, data.progress, data.duration);
-    // If connected to Spotify, apply the sync
-    if (spAccessToken && data.trackUri) {
-      await spApplyPlayback(data.trackUri, data.progress, data.playing);
-    }
-    addMsg('sp','System','Synced to: ' + data.trackTitle,'#1DB954',true);
+  // Host loaded a new track — everyone loads it
+  spSocket.on('sp_load', ({ senderId, name: n, trackId, position }) => {
+    if (senderId === spMySocketId) return; // I already loaded it
+    spCurrentTrackId = trackId;
+    spCreateEmbedController(trackId, position || 0, true, null);
+    document.getElementById('sp-controls').style.display = 'block';
+    addMsg('sp','System', n + ' loaded a track 🎵','#1DB954',true);
   });
 
-  spSocket.on('sp_control', async ({ senderId, name: n, action }) => {
-    if (spAccessToken) await spSendControl(action);
-    addMsg('sp','System', n + ' → ' + action,'#1DB954',true);
+  spSocket.on('sp_play', ({ senderId, name: n, position }) => {
+    if (senderId === spMySocketId) return;
+    if (spEmbedController) { spEmbedController.seek(position || spCurrentPosition); spEmbedController.play(); }
+    addMsg('sp','System', n + ' pressed play','#1DB954',true);
+  });
+
+  spSocket.on('sp_pause', ({ senderId, name: n }) => {
+    if (senderId === spMySocketId) return;
+    spEmbedController?.pause?.();
+    addMsg('sp','System', n + ' paused','#1DB954',true);
+  });
+
+  spSocket.on('sp_seek', ({ senderId, name: n, position }) => {
+    if (senderId === spMySocketId) return;
+    spEmbedController?.seek?.(position);
   });
 }
 
@@ -655,113 +736,39 @@ function spJoin() {
   spInitSocket(code, name, false);
   document.getElementById('sp-lobby').style.display = 'none';
   document.getElementById('sp-room').classList.add('visible');
-  addMsg('sp','System','Joined room ' + code,'#7b6fff',true);
+  addMsg('sp','System','Joined room ' + code + '. Waiting for host to load a track.','#7b6fff',true);
   toast('Joined room ' + code);
 }
 
-async function spConnect() {
-  const dc = document.getElementById('sp-dc-input').value.trim();
-  if (!dc || dc.length < 20) { toast('⚠️ Paste your sp_dc cookie value'); return; }
-  toast('🔄 Connecting to Spotify…');
-  try {
-    const res = await fetch('/api/spotify/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sp_dc: dc })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.accessToken) throw new Error(data.error || 'Failed');
-    spAccessToken = data.accessToken;
-    document.getElementById('sp-auth-section').style.display = 'none';
-    document.getElementById('sp-connected-section').style.display = 'block';
-    toast('✅ Spotify connected!');
-    addMsg('sp','System', spMyName + ' connected their Spotify ✓','#1DB954',true);
-    spPollPlayback();
-  } catch(e) {
-    toast('❌ ' + e.message);
-  }
-}
-
-async function spPollPlayback() {
-  clearInterval(spPolling);
-  const poll = async () => {
-    if (!spAccessToken) return;
-    try {
-      const res = await fetch('https://api.spotify.com/v1/me/player', {
-        headers: { Authorization: 'Bearer ' + spAccessToken }
-      });
-      if (res.status === 204 || res.status === 202) return; // no active device
-      if (res.status === 401) { clearInterval(spPolling); toast('⚠️ Spotify token expired — reconnect'); return; }
-      const d = await res.json();
-      if (!d.item) return;
-      spIsPlaying = d.is_playing;
-      spProgress = d.progress_ms;
-      spDuration = d.item.duration_ms;
-      const artUrl = d.item.album?.images?.[0]?.url;
-      spUpdateUI(d.item.name, d.item.artists?.map(a=>a.name).join(', '), spProgress, spDuration, artUrl);
-      document.getElementById('sp-play-btn').textContent = d.is_playing ? '⏸' : '▶';
-      // If host, broadcast sync every ~5s
-      if (spMembers.find(m=>m.id===spMySocketId)?.isHost && d.is_playing) {
-        spSocket?.emit('sp_sync', {
-          trackTitle: d.item.name,
-          trackArtist: d.item.artists?.map(a=>a.name).join(', '),
-          trackUri: d.item.uri,
-          progress: spProgress, duration: spDuration, playing: d.is_playing
-        });
-      }
-    } catch(e) { /* network error, skip */ }
-  };
-  poll();
-  spPolling = setInterval(poll, 5000);
-}
-
-function spUpdateUI(title, artist, progress, duration, artUrl) {
-  document.getElementById('sp-track').textContent = title || 'Not playing';
-  document.getElementById('sp-artist').textContent = artist || '—';
-  document.getElementById('sp-prog').style.width = duration > 0 ? (progress/duration*100).toFixed(1)+'%' : '0%';
-  document.getElementById('sp-cur').textContent = fmt(progress);
-  document.getElementById('sp-dur').textContent = fmt(duration);
-  if (artUrl) document.getElementById('sp-art').innerHTML = `<img src="${artUrl}" alt="art">`;
-}
-
-async function spApplyPlayback(trackUri, progressMs, playing) {
-  if (!spAccessToken) return;
-  try {
-    if (playing) {
-      await fetch('https://api.spotify.com/v1/me/player/play', {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer ' + spAccessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uris: [trackUri], position_ms: progressMs })
-      });
-    } else {
-      await fetch('https://api.spotify.com/v1/me/player/pause', {
-        method: 'PUT', headers: { Authorization: 'Bearer ' + spAccessToken }
-      });
-    }
-  } catch(e) { /* ignore */ }
-}
-
-async function spSendControl(action) {
-  if (!spAccessToken) return;
-  const endpoints = {
-    play:  ['PUT',  'https://api.spotify.com/v1/me/player/play'],
-    pause: ['PUT',  'https://api.spotify.com/v1/me/player/pause'],
-    next:  ['POST', 'https://api.spotify.com/v1/me/player/next'],
-    prev:  ['POST', 'https://api.spotify.com/v1/me/player/previous'],
-  };
-  const ep = endpoints[action]; if (!ep) return;
-  try {
-    await fetch(ep[1], { method: ep[0], headers: { Authorization: 'Bearer ' + spAccessToken } });
-    setTimeout(spPollPlayback, 500);
-  } catch(e) { /* ignore */ }
-}
-
-async function spCtrl(a) {
+function spLoad() {
   if (!spSocket) { toast('⚠️ Join a room first'); return; }
-  if (a === 'toggle') a = spIsPlaying ? 'pause' : 'play';
-  if (a === 'resync') { toast('🔄 Re-syncing…'); return; }
-  if (spAccessToken) await spSendControl(a);
-  spSocket.emit('sp_control', { action: a });
+  const url = document.getElementById('sp-url-input').value.trim();
+  const trackId = spExtractTrackId(url);
+  if (!trackId) { toast('⚠️ Paste a valid Spotify track link'); return; }
+  spCurrentTrackId = trackId;
+  // Create the embed for myself first
+  spCreateEmbedController(trackId, 0, true, () => {
+    // Tell everyone else to load it too
+    spSocket.emit('sp_load', { trackId, position: 0 });
+    addMsg('sp','System','You loaded a track — syncing everyone…','#1DB954',true);
+  });
+  document.getElementById('sp-controls').style.display = 'block';
+}
+
+function spCtrl(a) {
+  if (!spSocket || !spEmbedController) { toast('⚠️ Load a track first'); return; }
+  if (a === 'play') {
+    spEmbedController.play();
+    spSocket.emit('sp_play', { position: spCurrentPosition });
+  } else if (a === 'pause') {
+    spEmbedController.pause();
+    spSocket.emit('sp_pause', { position: spCurrentPosition });
+  } else if (a === 'resync') {
+    // Broadcast my current position to everyone — they all seek to it
+    spSocket.emit('sp_seek', { position: spCurrentPosition });
+    spSocket.emit('sp_play', { position: spCurrentPosition });
+    toast('🔄 Synced everyone to your position');
+  }
 }
 
 function spChat() {
