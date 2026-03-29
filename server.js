@@ -2,245 +2,202 @@ const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-
 const path = require("path");
 
-// ─────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "*"; // set in production
+const FRONTEND_URL = process.env.FRONTEND_URL || "*";
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: FRONTEND_URL, methods: ["GET", "POST"] },
+  // FIX: allow polling fallback so Brave & mobile browsers that block WS upgrades still work
+  transports: ["websocket", "polling"],
 });
 
 app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public"))); // serve frontend
+app.use(express.static(path.join(__dirname, "public")));
 
-// ─────────────────────────────────────────
-// IN-MEMORY ROOM STORE
-// rooms[code] = { members: Map, ytState, spState }
-// ─────────────────────────────────────────
+// ─── ROOM STORE ───
+// rooms[code] = { members: Map<socketId, {name,color,isHost}>, ytState, spState }
 const rooms = new Map();
 
-function getOrCreateRoom(code) {
+function getOrCreate(code) {
   if (!rooms.has(code)) {
-    rooms.set(code, {
-      members: new Map(), // socketId → { name, color, isHost }
-      ytState: null,      // { videoId, timestamp, playing, updatedAt }
-      spState: null,      // { trackTitle, trackArtist, progress, duration, playing, updatedAt }
-    });
+    rooms.set(code, { members: new Map(), ytState: null, spState: null });
   }
   return rooms.get(code);
 }
 
-function cleanEmptyRooms() {
+function memberList(room) {
+  return Array.from(room.members.entries()).map(([id, m]) => ({ id, ...m }));
+}
+
+function cleanEmpty() {
   for (const [code, room] of rooms.entries()) {
     if (room.members.size === 0) rooms.delete(code);
   }
 }
 
-function roomMemberList(room) {
-  return Array.from(room.members.entries()).map(([id, m]) => ({ id, ...m }));
-}
-
-// No REST endpoints needed — Spotify sync is fully embed-based via Socket.io
-
-// ─────────────────────────────────────────
-// SOCKET.IO — ROOM EVENTS
-// ─────────────────────────────────────────
+// ─── SOCKET EVENTS ───
 io.on("connection", (socket) => {
-  let currentRoom = null;
-  let currentCode = null;
+  let room = null;
+  let code = null;
 
-  // ── JOIN ROOM ──
+  // JOIN
   socket.on("join_room", ({ roomCode, name, color, isHost }) => {
     if (!roomCode || !name) return;
+    const safeCode  = String(roomCode).toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12);
+    const safeName  = String(name).replace(/[<>&"]/g, "").slice(0, 24);
+    const safeColor = String(color || "").replace(/[^#a-fA-F0-9]/g, "").slice(0, 7) || "#7b6fff";
 
-    // Validate inputs
-    const safeCode = String(roomCode).toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12);
-    const safeName = String(name).replace(/[<>]/g, "").slice(0, 24);
-    const safeColor = String(color).replace(/[^#a-fA-F0-9]/g, "").slice(0, 7);
+    room = getOrCreate(safeCode);
+    code = safeCode;
 
-    const room = getOrCreateRoom(safeCode);
-    const alreadyHasHost = Array.from(room.members.values()).some((m) => m.isHost);
-    const assignedHost = isHost && !alreadyHasHost;
+    const alreadyHasHost = [...room.members.values()].some(m => m.isHost);
+    const asHost = Boolean(isHost) && !alreadyHasHost;
 
-    room.members.set(socket.id, {
-      name: safeName,
-      color: safeColor || "#7b6fff",
-      isHost: assignedHost,
-    });
-
+    room.members.set(socket.id, { name: safeName, color: safeColor, isHost: asHost });
     socket.join(safeCode);
-    currentRoom = room;
-    currentCode = safeCode;
 
-    // Tell the joiner the current room state
+    // Send joiner the full current state
     socket.emit("room_state", {
-      members: roomMemberList(room),
+      yourId: socket.id,
+      members: memberList(room),
       ytState: room.ytState,
       spState: room.spState,
-      yourId: socket.id,
     });
 
-    // Tell everyone else someone joined
+    // Tell the rest
     socket.to(safeCode).emit("member_joined", {
-      id: socket.id,
-      name: safeName,
-      color: safeColor,
-      isHost: assignedHost,
+      id: socket.id, name: safeName, color: safeColor, isHost: asHost,
     });
 
-    console.log(`[${safeCode}] ${safeName} joined (host: ${assignedHost})`);
+    console.log(`[${safeCode}] ${safeName} joined (host:${asHost})`);
   });
 
-  // ── CHAT ──
+  // REQUEST STATE (for re-sync button)
+  socket.on("request_state", () => {
+    if (!room) return;
+    socket.emit("room_state", {
+      yourId: socket.id,
+      members: memberList(room),
+      ytState: room.ytState,
+      spState: room.spState,
+    });
+  });
+
+  // CHAT — broadcast to whole room including sender so everyone sees it
   socket.on("chat", ({ text }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    const safeText = String(text).replace(/[<>]/g, "").slice(0, 200);
-    io.to(currentCode).emit("chat", {
-      senderId: socket.id,
-      name: member.name,
-      color: member.color,
-      text: safeText,
-    });
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    const safeText = String(text).replace(/[<>&"]/g, "").slice(0, 200);
+    io.to(code).emit("chat", { senderId: socket.id, name: m.name, color: m.color, text: safeText });
   });
 
-  // ── YOUTUBE: LOAD VIDEO ──
-  socket.on("yt_load", ({ videoId, timestamp, title }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
+  // ── YOUTUBE ──
+  socket.on("yt_load", ({ videoId, timestamp }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
     const safeId = String(videoId).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 11);
-    currentRoom.ytState = { videoId: safeId, timestamp: timestamp || 0, playing: true, updatedAt: Date.now() };
-    io.to(currentCode).emit("yt_load", {
-      senderId: socket.id, name: member.name,
-      videoId: safeId, timestamp: timestamp || 0, playing: true, title,
-    });
+    room.ytState = { videoId: safeId, timestamp: Number(timestamp)||0, playing: true, updatedAt: Date.now() };
+    // Broadcast to everyone INCLUDING sender (sender filters by senderId client-side)
+    io.to(code).emit("yt_load", { senderId: socket.id, name: m.name, videoId: safeId, timestamp: Number(timestamp)||0 });
   });
 
-  // ── YOUTUBE: PLAY ──
   socket.on("yt_play", ({ timestamp }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    if (currentRoom.ytState) {
-      currentRoom.ytState.playing = true;
-      currentRoom.ytState.timestamp = timestamp;
-      currentRoom.ytState.updatedAt = Date.now();
-    }
-    socket.to(currentCode).emit("yt_play", { senderId: socket.id, name: member.name, timestamp });
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    if (room.ytState) { room.ytState.playing = true; room.ytState.timestamp = Number(timestamp)||0; room.ytState.updatedAt = Date.now(); }
+    // FIX: use io.to (not socket.to) so SENDER also receives the echo → appears in their chat
+    io.to(code).emit("yt_play", { senderId: socket.id, name: m.name, timestamp: Number(timestamp)||0 });
   });
 
-  // ── YOUTUBE: PAUSE ──
   socket.on("yt_pause", ({ timestamp }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    if (currentRoom.ytState) {
-      currentRoom.ytState.playing = false;
-      currentRoom.ytState.timestamp = timestamp;
-      currentRoom.ytState.updatedAt = Date.now();
-    }
-    socket.to(currentCode).emit("yt_pause", { senderId: socket.id, name: member.name, timestamp });
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    if (room.ytState) { room.ytState.playing = false; room.ytState.timestamp = Number(timestamp)||0; room.ytState.updatedAt = Date.now(); }
+    // FIX: echo to sender too
+    io.to(code).emit("yt_pause", { senderId: socket.id, name: m.name, timestamp: Number(timestamp)||0 });
   });
 
-  // ── YOUTUBE: SEEK ──
   socket.on("yt_seek", ({ timestamp }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    if (currentRoom.ytState) currentRoom.ytState.timestamp = timestamp;
-    socket.to(currentCode).emit("yt_seek", { senderId: socket.id, name: member.name, timestamp });
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    if (room.ytState) room.ytState.timestamp = Number(timestamp)||0;
+    socket.to(code).emit("yt_seek", { senderId: socket.id, timestamp: Number(timestamp)||0 });
   });
 
-  // ── SPOTIFY: LOAD TRACK (host loads a track for everyone) ──
-  socket.on("sp_load", (data) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member) return;
-    // trackId: Spotify track ID, e.g. "4iV5W9uYEdYUVa79Axb7Rh"
-    const safeTrackId = String(data.trackId || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 30);
-    if (!safeTrackId) return;
-    currentRoom.spState = {
-      trackId: safeTrackId,
-      trackName: String(data.trackName || "").slice(0, 100),
-      artistName: String(data.artistName || "").slice(0, 100),
-      position: 0,
-      playing: true,
-      updatedAt: Date.now(),
-    };
-    io.to(currentCode).emit("sp_load", {
-      senderId: socket.id, name: member.name,
-      ...currentRoom.spState,
+  // ── SPOTIFY ──
+  socket.on("sp_load", ({ trackId, position }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    const safeTrack = String(trackId||"").replace(/[^a-zA-Z0-9]/g, "").slice(0, 30);
+    if (!safeTrack) return;
+    room.spState = { trackId: safeTrack, position: Number(position)||0, playing: true, updatedAt: Date.now() };
+    // Send to everyone except sender (sender already loaded it locally)
+    socket.to(code).emit("sp_load", { senderId: socket.id, name: m.name, trackId: safeTrack, position: Number(position)||0 });
+  });
+
+  // FIX: sp_play echoes to EVERYONE (including sender) so host sees their action in chat
+  socket.on("sp_play", ({ position }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    const pos = Number(position)||0;
+    if (room.spState) { room.spState.playing = true; room.spState.position = pos; room.spState.updatedAt = Date.now(); }
+    io.to(code).emit("sp_play", { senderId: socket.id, name: m.name, position: pos });
+  });
+
+  // FIX: sp_pause echoes to EVERYONE
+  socket.on("sp_pause", ({ position }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    const pos = Number(position)||0;
+    if (room.spState) { room.spState.playing = false; room.spState.position = pos; room.spState.updatedAt = Date.now(); }
+    io.to(code).emit("sp_pause", { senderId: socket.id, name: m.name, position: pos });
+  });
+
+  socket.on("sp_seek", ({ position }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m) return;
+    const pos = Number(position)||0;
+    if (room.spState) { room.spState.position = pos; room.spState.updatedAt = Date.now(); }
+    socket.to(code).emit("sp_seek", { senderId: socket.id, position: pos });
+  });
+
+  // FIX: heartbeat — host broadcasts every 4s; server relays to all OTHER members
+  socket.on("sp_heartbeat", ({ trackId, position, playing }) => {
+    if (!code || !room) return;
+    const m = room.members.get(socket.id); if (!m || !m.isHost) return; // only trust host
+    const safeTrack = String(trackId||"").replace(/[^a-zA-Z0-9]/g, "").slice(0, 30);
+    const pos = Number(position)||0;
+    // Update server state so late-joiners get correct position
+    if (room.spState) { room.spState.position = pos; room.spState.playing = Boolean(playing); room.spState.updatedAt = Date.now(); }
+    // Relay to non-hosts only
+    socket.to(code).emit("sp_heartbeat", {
+      senderId: socket.id, trackId: safeTrack, position: pos, playing: Boolean(playing),
     });
   });
 
-  // ── SPOTIFY: PLAY ──
-  socket.on("sp_play", ({ position }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member || !currentRoom.spState) return;
-    currentRoom.spState.playing = true;
-    currentRoom.spState.position = Number(position) || 0;
-    currentRoom.spState.updatedAt = Date.now();
-    socket.to(currentCode).emit("sp_play", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
-  });
-
-  // ── SPOTIFY: PAUSE ──
-  socket.on("sp_pause", ({ position }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member || !currentRoom.spState) return;
-    currentRoom.spState.playing = false;
-    currentRoom.spState.position = Number(position) || 0;
-    currentRoom.spState.updatedAt = Date.now();
-    socket.to(currentCode).emit("sp_pause", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
-  });
-
-  // ── SPOTIFY: SEEK ──
-  socket.on("sp_seek", ({ position }) => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    if (!member || !currentRoom.spState) return;
-    currentRoom.spState.position = Number(position) || 0;
-    currentRoom.spState.updatedAt = Date.now();
-    socket.to(currentCode).emit("sp_seek", { senderId: socket.id, name: member.name, position: currentRoom.spState.position });
-  });
-
-  // ── DISCONNECT ──
+  // DISCONNECT
   socket.on("disconnect", () => {
-    if (!currentCode || !currentRoom) return;
-    const member = currentRoom.members.get(socket.id);
-    currentRoom.members.delete(socket.id);
-
-    if (member) {
-      // If host left, reassign host to next member
-      if (member.isHost && currentRoom.members.size > 0) {
-        const [newHostId, newHost] = currentRoom.members.entries().next().value;
-        newHost.isHost = true;
-        io.to(currentCode).emit("host_changed", { id: newHostId, name: newHost.name });
+    if (!code || !room) return;
+    const m = room.members.get(socket.id);
+    room.members.delete(socket.id);
+    if (m) {
+      if (m.isHost && room.members.size > 0) {
+        const [newId, newM] = room.members.entries().next().value;
+        newM.isHost = true;
+        io.to(code).emit("host_changed", { id: newId, name: newM.name });
       }
-
-      io.to(currentCode).emit("member_left", { id: socket.id, name: member.name });
-      console.log(`[${currentCode}] ${member.name} disconnected`);
+      io.to(code).emit("member_left", { id: socket.id, name: m.name });
+      console.log(`[${code}] ${m.name} left`);
     }
-
-    cleanEmptyRooms();
+    cleanEmpty();
   });
 });
 
-// ─────────────────────────────────────────
-// START SERVER
-// ─────────────────────────────────────────
 httpServer.listen(PORT, () => {
-  console.log(`\n🚀 SyncSpace running at http://localhost:${PORT}`);
-  console.log(`   Rooms: in-memory | Socket.io: enabled\n`);
+  console.log(`\n🚀 SyncSpace → http://localhost:${PORT}\n`);
 });
