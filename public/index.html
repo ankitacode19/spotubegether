@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>SyncSpace — Watch & Listen Together</title>
+<title>SpotubeGether</title>
+<link rel="icon" href="logo.png" type="image/png">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 <script src="/socket.io/socket.io.js"></script>
 <style>
@@ -167,7 +168,7 @@
 <div id="page-landing" class="page active">
   <div class="landing-bg"></div>
   <div class="landing-center">
-    <div class="logo-mark"><span></span> SyncSpace</div>
+    <div class="logo-mark"><span></span> SpotubeGether</div>
     <h1 class="landing-headline">Watch and listen<br><em>together</em>, for real.</h1>
     <p class="landing-sub">YouTube watch parties & Spotify listen-alongs —<br>no Premium needed, no accounts required.</p>
     <div class="card-row">
@@ -209,7 +210,7 @@
       <div class="lobby-title">▶ YouTube Together</div>
       <p class="lobby-sub">Create a room and share the code — everyone watches in sync. No account needed.</p>
       <label class="field-label">Your display name</label>
-      <input class="field-input" id="yt-name" placeholder="e.g. Alex" maxlength="24" autocomplete="off">
+      <input class="field-input" id="yt-name" placeholder="Enter" maxlength="24" autocomplete="off">
       <button class="btn btn-yt" onclick="ytCreate()">✨ Create new room</button>
       <div class="divider">or join existing</div>
       <label class="field-label">Room code</label>
@@ -280,7 +281,7 @@
       <div class="lobby-title">♫ Spotify Listen Along</div>
       <p class="lobby-sub">No cookies, no Premium needed. The host loads a track via Spotify embed — everyone hears it in sync.</p>
       <label class="field-label">Your display name</label>
-      <input class="field-input" id="sp-name" placeholder="e.g. Jordan" maxlength="24" autocomplete="off">
+      <input class="field-input" id="sp-name" placeholder="Enter" maxlength="24" autocomplete="off">
       <button class="btn btn-sp" onclick="spCreate()">✨ Create new room</button>
       <div class="divider">or join existing</div>
       <label class="field-label">Room code</label>
