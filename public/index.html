@@ -3,8 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>SpotubeGether</title>
-<link rel="icon" href="logo.png" type="image/png">
+<title>SyncSpace — Watch & Listen Together</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 <script src="/socket.io/socket.io.js"></script>
 <style>
@@ -168,7 +167,7 @@
 <div id="page-landing" class="page active">
   <div class="landing-bg"></div>
   <div class="landing-center">
-    <div class="logo-mark"><span></span> SpotubeGether</div>
+    <div class="logo-mark"><span></span> SyncSpace</div>
     <h1 class="landing-headline">Watch and listen<br><em>together</em>, for real.</h1>
     <p class="landing-sub">YouTube watch parties & Spotify listen-alongs —<br>no Premium needed, no accounts required.</p>
     <div class="card-row">
@@ -210,7 +209,7 @@
       <div class="lobby-title">▶ YouTube Together</div>
       <p class="lobby-sub">Create a room and share the code — everyone watches in sync. No account needed.</p>
       <label class="field-label">Your display name</label>
-      <input class="field-input" id="yt-name" placeholder="Enter" maxlength="24" autocomplete="off">
+      <input class="field-input" id="yt-name" placeholder="e.g. Alex" maxlength="24" autocomplete="off">
       <button class="btn btn-yt" onclick="ytCreate()">✨ Create new room</button>
       <div class="divider">or join existing</div>
       <label class="field-label">Room code</label>
@@ -281,7 +280,7 @@
       <div class="lobby-title">♫ Spotify Listen Along</div>
       <p class="lobby-sub">No cookies, no Premium needed. The host loads a track via Spotify embed — everyone hears it in sync.</p>
       <label class="field-label">Your display name</label>
-      <input class="field-input" id="sp-name" placeholder="Enter" maxlength="24" autocomplete="off">
+      <input class="field-input" id="sp-name" placeholder="e.g. Jordan" maxlength="24" autocomplete="off">
       <button class="btn btn-sp" onclick="spCreate()">✨ Create new room</button>
       <div class="divider">or join existing</div>
       <label class="field-label">Room code</label>
@@ -315,9 +314,9 @@
         </div>
         <p style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5">🔄 Sync All = everyone jumps to your current timestamp instantly.</p>
       </div>
-      <!-- <div class="sp-note">
+      <div class="sp-note">
         <strong style="color:var(--text)">How it works</strong> — Host loads a Spotify embed. The server broadcasts the track + position to everyone every 4 seconds. Each listener's embed seeks to stay in sync automatically. No Spotify account or login needed.
-      </div> -->
+      </div>
     </div>
     <div class="sidebar">
       <div class="members-card">
@@ -624,16 +623,40 @@ function ytChat() {
 // SPOTIFY LISTEN ALONG (embed-based, no cookies)
 // ════════════════════════════════
 let spSock = null, spMyId = null, spMembers = [], spMyName = 'Guest';
-let spCtrlObj = null;       // Spotify IFrame controller
-let spPosition = 0;         // seconds (float), updated by playback_update
+let spEmbed = null;          // Spotify IFrame controller
+let spPosition = 0;          // seconds, tracked carefully
 let spIsPaused = true;
-let spHeartbeatTick = null; // setInterval — host only, sends position every 4s
-let spIgnoreUntil = 0;      // timestamp ms — debounce rapid external seeks
+let spHeartbeatTick = null;
+
+// ─── Seek-loop prevention ───────────────────────────────────────────────────
+// Root cause of the loop bug:
+//   seek(45) → embed fires playback_update with position=0 (seek not settled yet)
+//   → spPosition=0 → next heartbeat sees drift=45 → seeks again → infinite loop
+//
+// Fix: when we call seek(), we manually set spPosition to the target immediately.
+// We also block playback_update from overwriting spPosition for 3 seconds after
+// any seek (spSeekSettleUntil). During that window we interpolate position forward.
+// We also block heartbeat corrections for 5 seconds after load/seek (spCooldownUntil).
+// ────────────────────────────────────────────────────────────────────────────
+let spSeekSettleUntil = 0;   // don't trust playback_update.position until this ms
+let spSeekSettleFrom = 0;    // ms timestamp when the last seek was issued
+let spSeekTarget = 0;        // what position we seeked to (seconds)
+let spCooldownUntil = 0;     // don't apply heartbeat corrections until this ms
+
+function spDoSeek(ctrl, posSec) {
+  // Call this instead of ctrl.seek() directly — sets up the anti-loop guard
+  spSeekTarget = posSec;
+  spSeekSettleFrom = Date.now();
+  spSeekSettleUntil = Date.now() + 3000;
+  spPosition = posSec;       // pre-set so drift calc is immediately correct
+  ctrl.seek(posSec);
+}
 
 function spLeave() {
   clearInterval(spHeartbeatTick); spHeartbeatTick = null;
   if (spSock) { spSock.disconnect(); spSock = null; }
-  spCtrlObj = null; spPosition = 0; spIsPaused = true;
+  spEmbed = null; spPosition = 0; spIsPaused = true;
+  spSeekSettleUntil = 0; spCooldownUntil = 0;
   const el = document.getElementById('sp-embed-el');
   if (el) { el.innerHTML = ''; el.style.display = 'none'; }
   const ph = document.getElementById('sp-placeholder');
@@ -652,12 +675,12 @@ function spExtractTrackId(url) {
 
 function spMakeController(trackId, startSec, autoPlay) {
   if (!window._SpotifyAPI) {
-    // API script not loaded yet — retry in 1s
-    setTimeout(() => spMakeController(trackId, startSec, autoPlay), 1000);
+    setTimeout(() => spMakeController(trackId, startSec, autoPlay), 800);
     toast('⌛ Loading Spotify embed…');
     return;
   }
-  startSec = startSec || 0; autoPlay = autoPlay !== false;
+  startSec = Math.max(0, startSec || 0);
+  autoPlay = autoPlay !== false;
 
   const el = document.getElementById('sp-embed-el');
   el.innerHTML = '';
@@ -665,32 +688,54 @@ function spMakeController(trackId, startSec, autoPlay) {
   document.getElementById('sp-placeholder').style.display = 'none';
   document.getElementById('sp-controls').style.display = 'block';
 
+  // Block heartbeat corrections for 6s while embed initialises
+  spCooldownUntil = Date.now() + 6000;
+  if (startSec > 0) {
+    // Pre-set so drift calc is right even before ready fires
+    spPosition = startSec;
+    spSeekTarget = startSec;
+    spSeekSettleFrom = Date.now();
+    spSeekSettleUntil = Date.now() + 5000;
+  }
+
   window._SpotifyAPI.createController(el, {
     uri: 'spotify:track:' + trackId,
     width: '100%',
     height: '152'
   }, (ctrl) => {
-    spCtrlObj = ctrl;
-    spCtrlObj._trackId = trackId;
+    spEmbed = ctrl;
+    spEmbed._trackId = trackId;
 
     ctrl.addListener('ready', () => {
-      if (startSec > 0) ctrl.seek(startSec);
-      if (autoPlay) {
-        // Delay play slightly after seek to avoid "restart from 0" bug in embed
-        setTimeout(() => ctrl.resume(), startSec > 0 ? 400 : 50);
+      if (startSec > 0) {
+        // Use spDoSeek so the guard is properly set
+        spDoSeek(ctrl, startSec);
+        // Resume after seek has had time to register in the embed
+        if (autoPlay) setTimeout(() => ctrl.resume(), 600);
+      } else {
+        if (autoPlay) setTimeout(() => ctrl.resume(), 100);
       }
     });
 
     ctrl.addListener('playback_update', (e) => {
-      spPosition = e.data.position;  // seconds as float
       spIsPaused = e.data.isPaused;
+
+      const now = Date.now();
+      if (now < spSeekSettleUntil) {
+        // Seek hasn't settled — interpolate forward from seek target instead
+        // This prevents spPosition from being reset to 0
+        spPosition = spSeekTarget + (now - spSeekSettleFrom) / 1000;
+      } else {
+        // Seek settled — trust the embed's reported position
+        spPosition = e.data.position;
+      }
     });
   });
 }
 
 function spInitSocket(code, name, isHost) {
   spMyName = name;
-  spSock = io({ transports: ['websocket', 'polling'] }); // FIX: polling fallback for all browsers
+  spSock = io({ transports: ['websocket', 'polling'] });
 
   spSock.on('connect', () => {
     setConn('sp', true);
@@ -702,7 +747,6 @@ function spInitSocket(code, name, isHost) {
   spSock.on('room_state', ({ yourId, members, spState }) => {
     spMyId = yourId; spMembers = members;
     renderMembers('sp', members, spMyId);
-    // If room already has a track playing, join in
     if (spState && spState.trackId) {
       const elapsed = spState.playing ? (Date.now() - spState.updatedAt) / 1000 : 0;
       spMakeController(spState.trackId, spState.position + elapsed, spState.playing);
@@ -719,34 +763,44 @@ function spInitSocket(code, name, isHost) {
     addMsg('sp', '', n + ' left', '', true);
   });
   spSock.on('host_changed', ({ name: n }) => addMsg('sp', '', n + ' is now the host', '', true));
-
   spSock.on('chat', ({ senderId, name: n, color, text }) => {
     if (senderId !== spMyId) addMsg('sp', n, text, color, false);
   });
 
-  // ── HEARTBEAT (host → all non-hosts every 4s) ──
-  // FIX: this is how non-hosts stay in sync — periodic position broadcast
+  // ── HEARTBEAT ──────────────────────────────────────────────────────────────
+  // Host broadcasts every 4s. Non-hosts use it to stay aligned.
+  // Only seek if drift is large AND we're not in a cooldown from a recent seek.
+  // ──────────────────────────────────────────────────────────────────────────
   spSock.on('sp_heartbeat', ({ senderId, trackId, position, playing }) => {
     if (senderId === spMyId) return;
-    const now = Date.now();
-    if (now < spIgnoreUntil) return; // debounce: don't react to own seeks
 
-    // Different track? Reload embed
-    if (!spCtrlObj || spCtrlObj._trackId !== trackId) {
+    // Wrong track → reload
+    if (!spEmbed || spEmbed._trackId !== trackId) {
       spMakeController(trackId, position, playing);
       return;
     }
-    // Drift > 2.5s? Seek to correct position
-    const drift = Math.abs(spPosition - position);
-    if (drift > 2.5) {
-      spIgnoreUntil = now + 2500;
-      spCtrlObj.seek(position);
-      // After seek, resume if host is playing
-      if (playing) setTimeout(() => spCtrlObj.resume(), 350);
+
+    const now = Date.now();
+    // In cooldown (just loaded or just seeked) — only sync play/pause, not position
+    if (now < spCooldownUntil) {
+      if (playing && spIsPaused) spEmbed.resume();
+      else if (!playing && !spIsPaused) spEmbed.pause();
+      return;
     }
-    // State mismatch?
-    if (playing && spIsPaused) setTimeout(() => spCtrlObj.resume(), 100);
-    else if (!playing && !spIsPaused) spCtrlObj.pause();
+
+    const drift = Math.abs(spPosition - position);
+
+    // Only seek if drift is larger than 8 seconds — avoids constant micro-corrections
+    if (drift > 8) {
+      spCooldownUntil = now + 5000;   // lock out for 5s after this seek
+      spDoSeek(spEmbed, position);
+      if (playing) setTimeout(() => spEmbed.resume(), 600);
+      return;
+    }
+
+    // Soft play/pause sync (no seek)
+    if (playing && spIsPaused) spEmbed.resume();
+    else if (!playing && !spIsPaused) spEmbed.pause();
   });
 
   // ── NEW TRACK ──
@@ -756,40 +810,47 @@ function spInitSocket(code, name, isHost) {
     addMsg('sp', '', n + ' loaded a track 🎵', '', true);
   });
 
-  // ── PLAY ── FIX: seek before play to avoid restart-from-zero bug
+  // ── PLAY ──
+  // Non-hosts: only seek if meaningfully out of sync, otherwise just resume.
+  // Avoids the restart-from-zero loop when already close to correct position.
   spSock.on('sp_play', ({ senderId, name: n, position }) => {
-    if (senderId !== spMyId && spCtrlObj) {
-      spIgnoreUntil = Date.now() + 1500;
-      spCtrlObj.seek(position);
-      setTimeout(() => spCtrlObj.resume(), 300); // delay after seek
+    if (senderId !== spMyId && spEmbed) {
+      const drift = Math.abs(spPosition - position);
+      if (drift > 5) {
+        // Out of sync — seek then play
+        spCooldownUntil = Date.now() + 4000;
+        spDoSeek(spEmbed, position);
+        setTimeout(() => spEmbed.resume(), 500);
+      } else {
+        // Close enough — just resume, no seek
+        spEmbed.resume();
+      }
     }
-    // FIX: show in chat for EVERYONE including host (server echoes back)
     addMsg('sp', '', n + ' pressed play ▶', '', true);
   });
 
   // ── PAUSE ──
   spSock.on('sp_pause', ({ senderId, name: n }) => {
-    if (senderId !== spMyId && spCtrlObj) spCtrlObj.pause();
+    if (senderId !== spMyId && spEmbed) spEmbed.pause();
     addMsg('sp', '', n + ' paused ⏸', '', true);
   });
 
-  // ── SEEK ──
+  // ── SEEK (from Sync All button) ──
   spSock.on('sp_seek', ({ senderId, position }) => {
-    if (senderId === spMyId) return;
-    spIgnoreUntil = Date.now() + 1500;
-    spCtrlObj?.seek?.(position);
+    if (senderId === spMyId || !spEmbed) return;
+    spCooldownUntil = Date.now() + 4000;
+    spDoSeek(spEmbed, position);
   });
 }
 
-// Host heartbeat — broadcasts position every 4 seconds
+// Host heartbeat interval — only fires if I'm the host
 function spStartHeartbeat() {
   clearInterval(spHeartbeatTick);
   spHeartbeatTick = setInterval(() => {
-    if (!spSock || !spCtrlObj) return;
-    const amHost = spMembers.find(m => m.id === spMyId)?.isHost;
-    if (!amHost) return;
+    if (!spSock || !spEmbed) return;
+    if (!spMembers.find(m => m.id === spMyId)?.isHost) return;
     spSock.emit('sp_heartbeat', {
-      trackId: spCtrlObj._trackId,
+      trackId: spEmbed._trackId,
       position: spPosition,
       playing: !spIsPaused
     });
@@ -799,7 +860,7 @@ function spStartHeartbeat() {
 function spCreate() {
   const name = document.getElementById('sp-name').value.trim() || 'Guest';
   const code = genCode();
-  clearRoom('sp'); // FIX: clear old messages
+  clearRoom('sp');
   document.getElementById('sp-room-code').textContent = code;
   document.getElementById('sp-room-badge').style.display = 'flex';
   spInitSocket(code, name, true);
@@ -814,7 +875,7 @@ function spJoin() {
   const name = document.getElementById('sp-name').value.trim() || 'Guest';
   const code = document.getElementById('sp-join-code').value.trim().toUpperCase();
   if (!code) { toast('⚠️ Enter a room code'); return; }
-  clearRoom('sp'); // FIX: clear old messages
+  clearRoom('sp');
   document.getElementById('sp-room-code').textContent = code;
   document.getElementById('sp-room-badge').style.display = 'flex';
   spInitSocket(code, name, false);
@@ -836,23 +897,22 @@ function spLoad() {
 }
 
 function spCtrl(a) {
-  if (!spSock || !spCtrlObj) { toast('⚠️ Load a track first'); return; }
+  if (!spSock || !spEmbed) { toast('⚠️ Load a track first'); return; }
   const myName = spMembers.find(m => m.id === spMyId)?.name || spMyName;
 
   if (a === 'play') {
-    // FIX: always seek to current position before calling play — prevents restart from zero
-    spCtrlObj.seek(spPosition);
-    setTimeout(() => spCtrlObj.resume(), 300);
+    // Just resume — don't seek before play, that's what causes the restart bug
+    spEmbed.resume();
     spSock.emit('sp_play', { position: spPosition });
-    // FIX: add to own chat immediately (server also echoes back)
     addMsg('sp', '', myName + ' pressed play ▶', '', true);
 
   } else if (a === 'pause') {
-    spCtrlObj.pause();
+    spEmbed.pause();
     spSock.emit('sp_pause', { position: spPosition });
     addMsg('sp', '', myName + ' paused ⏸', '', true);
 
   } else if (a === 'resync') {
+    // Push my exact position to everyone
     spSock.emit('sp_seek', { position: spPosition });
     spSock.emit('sp_play', { position: spPosition });
     addMsg('sp', '', myName + ' synced everyone 🔄', '', true);
